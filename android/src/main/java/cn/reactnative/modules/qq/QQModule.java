@@ -225,4 +225,7 @@ public class QQModule extends ReactContextBaseJavaModule implements IUiListener,
                 .getJSModule(RCTNativeAppEventEmitter.class)
                 .emit("QQ_Resp", map);
     }
+
+    // Required for RN 0.30+ modules than implement ActivityEventListener
+    public void onNewIntent(Intent intent) { }
 }
