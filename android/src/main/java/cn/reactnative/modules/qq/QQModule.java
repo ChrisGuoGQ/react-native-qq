@@ -8,30 +8,32 @@ import android.util.Log;
 
 import com.facebook.react.bridge.ActivityEventListener;
 import com.facebook.react.bridge.Arguments;
-import com.facebook.react.bridge.Promise;
+import com.facebook.react.bridge.Callback;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.modules.core.RCTNativeAppEventEmitter;
+import com.tencent.connect.common.Constants;
 import com.tencent.connect.share.QQShare;
 import com.tencent.tauth.IUiListener;
 import com.tencent.tauth.Tencent;
 import com.tencent.tauth.UiError;
 
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.Date;
+
 /**
  * Created by tdzl2_000 on 2015-10-10.
- *
- * Modified by Renguang Dong on 2016-05-25.
  */
 public class QQModule extends ReactContextBaseJavaModule implements IUiListener, ActivityEventListener {
     private String appId;
     private Tencent api;
     private final static String INVOKE_FAILED = "QQ API invoke returns false.";
     private boolean isLogin;
-    private Promise loginPromise;
-    private Promise shareToQQPromise;
-    private Promise shareToQzonePromise;
 
     private static final String RCTQQShareTypeNews = "news";
     private static final String RCTQQShareTypeImage = "image";
@@ -45,10 +47,6 @@ public class QQModule extends ReactContextBaseJavaModule implements IUiListener,
     private static final String RCTQQShareDescription = "description";
     private static final String RCTQQShareWebpageUrl = "webpageUrl";
     private static final String RCTQQShareImageUrl = "imageUrl";
-
-    private static final int SHARE_RESULT_CODE_SUCCESSFUL = 0;
-    private static final int SHARE_RESULT_CODE_FAILED = 1;
-    private static final int SHARE_RESULT_CODE_CANCEL = 2;
 
     public QQModule(ReactApplicationContext context) {
         super(context);
@@ -91,30 +89,27 @@ public class QQModule extends ReactContextBaseJavaModule implements IUiListener,
     }
 
     @ReactMethod
-    public void login(String scopes, Promise promise){
-        this.loginPromise = promise;
+    public void login(String scopes, Callback callback){
         this.isLogin = true;
         if (!api.isSessionValid()){
             api.login(getCurrentActivity(), scopes == null ? "get_simple_userinfo" : scopes, this);
+            callback.invoke();
         } else {
-            this.loginPromise.reject(INVOKE_FAILED);
-            this.loginPromise = null;
+            callback.invoke(INVOKE_FAILED);
         }
     }
 
     @ReactMethod
-    public void shareToQQ(ReadableMap data, Promise promise){
-        this.shareToQQPromise = promise;
-        this._shareToQQ(data, 0);
+    public void shareToQQ(ReadableMap data, Callback callback){
+        _shareToQQ(data, 0, callback);
     }
 
     @ReactMethod
-    public void shareToQzone(ReadableMap data, Promise promise){
-        this.shareToQzonePromise = promise;
-        this._shareToQQ(data, 1);
+    public void shareToQzone(ReadableMap data, Callback callback){
+        _shareToQQ(data, 1, callback);
     }
 
-    private void _shareToQQ(ReadableMap data, int scene) {
+    private void _shareToQQ(ReadableMap data, int scene, Callback callback) {
         this.isLogin = false;
         Bundle bundle = new Bundle();
         if (data.hasKey(RCTQQShareTitle)){
@@ -127,7 +122,14 @@ public class QQModule extends ReactContextBaseJavaModule implements IUiListener,
             bundle.putString(QQShare.SHARE_TO_QQ_TARGET_URL, data.getString(RCTQQShareWebpageUrl));
         }
         if (data.hasKey(RCTQQShareImageUrl)){
-            bundle.putString(QQShare.SHARE_TO_QQ_IMAGE_URL, data.getString(RCTQQShareImageUrl));
+            if (scene == 0) {
+                bundle.putString(QQShare.SHARE_TO_QQ_IMAGE_URL, data.getString(RCTQQShareImageUrl));
+            }
+            else if (scene == 1) {
+                ArrayList<String> out = new ArrayList<>();
+                out.add(data.getString(RCTQQShareImageUrl));
+                bundle.putStringArrayList(QQShare.SHARE_TO_QQ_IMAGE_URL, out);
+            }
         }
         if (data.hasKey("appName")){
             bundle.putString(QQShare.SHARE_TO_QQ_APP_NAME, data.getString("appName"));
@@ -152,17 +154,13 @@ public class QQModule extends ReactContextBaseJavaModule implements IUiListener,
         }
 
         Log.e("QQShare", bundle.toString());
-
         if (scene == 0 ) {
-            // Share to QQ.
-            bundle.putInt(QQShare.SHARE_TO_QQ_EXT_INT, QQShare.SHARE_TO_QQ_FLAG_QZONE_ITEM_HIDE);
             api.shareToQQ(getCurrentActivity(), bundle, this);
         }
         else if (scene == 1) {
-            // Share to Qzone.
-            bundle.putInt(QQShare.SHARE_TO_QQ_EXT_INT, QQShare.SHARE_TO_QQ_FLAG_QZONE_AUTO_OPEN);
-            api.shareToQQ(getCurrentActivity(), bundle, this);
+            api.shareToQzone(getCurrentActivity(), bundle, this);
         }
+        callback.invoke();
     }
 
     private String _getType() {
@@ -175,46 +173,56 @@ public class QQModule extends ReactContextBaseJavaModule implements IUiListener,
 
     @Override
     public void onComplete(Object o) {
-        WritableMap resultMap = Arguments.createMap();
-        resultMap.putInt("code", SHARE_RESULT_CODE_SUCCESSFUL);
-        resultMap.putString("message", "Share successfully.");
+        try {
+            JSONObject obj = (JSONObject)(o);
 
-        this.resolvePromise(resultMap);
+            WritableMap map = Arguments.createMap();
+            map.putInt("errCode", 0);
+            map.putString("type", _getType());
+            if (isLogin) {
+                map.putString("openid", obj.getString(Constants.PARAM_OPEN_ID));
+                map.putString("access_token", obj.getString(Constants.PARAM_ACCESS_TOKEN));
+                map.putString("oauth_consumer_key", this.appId);
+                map.putDouble("expires_in", (new Date().getTime() + obj.getLong(Constants.PARAM_EXPIRES_IN)));
+            }
+
+            getReactApplicationContext()
+                    .getJSModule(RCTNativeAppEventEmitter.class)
+                    .emit("QQ_Resp", map);
+
+        } catch (Exception e){
+            WritableMap map = Arguments.createMap();
+            map.putInt("errCode", Constants.ERROR_UNKNOWN);
+            map.putString("errMsg", e.getLocalizedMessage());
+            map.putString("type", _getType());
+
+            getReactApplicationContext()
+                    .getJSModule(RCTNativeAppEventEmitter.class)
+                    .emit("QQ_Resp", map);
+        }
     }
 
     @Override
     public void onError(UiError uiError) {
-        WritableMap resultMap = Arguments.createMap();
-        resultMap.putInt("code", SHARE_RESULT_CODE_FAILED);
-        resultMap.putString("message", "Share failed." + uiError.errorDetail);
+        WritableMap map = Arguments.createMap();
+        map.putInt("err", uiError.errorCode);
+        map.putString("errMsg", uiError.errorMessage);
+        map.putString("type", _getType());
 
-        this.resolvePromise(resultMap);
+        getReactApplicationContext()
+                .getJSModule(RCTNativeAppEventEmitter.class)
+                .emit("QQ_Resp", map);
     }
 
     @Override
     public void onCancel() {
-        WritableMap resultMap = Arguments.createMap();
-        resultMap.putInt("code", SHARE_RESULT_CODE_CANCEL);
-        resultMap.putString("message", "Share canceled.");
+        WritableMap map = Arguments.createMap();
+        map.putInt("err", -1);
+        map.putString("errMsg", "Canceled.");
+        map.putString("type", _getType());
 
-        this.resolvePromise(resultMap);
+        getReactApplicationContext()
+                .getJSModule(RCTNativeAppEventEmitter.class)
+                .emit("QQ_Resp", map);
     }
-
-    private void resolvePromise(ReadableMap resultMap) {
-        if (this.loginPromise != null) {
-            this.loginPromise.resolve(resultMap);
-            this.loginPromise = null;
-        }
-        if (this.shareToQQPromise != null) {
-            this.shareToQQPromise.resolve(resultMap);
-            this.shareToQQPromise = null;
-        }
-        if (this.shareToQzonePromise != null) {
-            this.shareToQzonePromise.resolve(resultMap);
-            this.shareToQzonePromise = null;
-        }
-    }
-
-    // Required for RN 0.30+ modules than implement ActivityEventListener
-    public void onNewIntent(Intent intent) { }
 }
